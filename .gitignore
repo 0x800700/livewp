@@ -1,0 +1,19 @@
+# Gradle files
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+.DS_Store
+
+# Android Studio
+captures/
+.externalNativeBuild
+.cxx
+
+# APK files
+*.apk
+*.aab
+
+# Backup files
+*_backup.kt
