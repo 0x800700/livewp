@@ -131,7 +131,12 @@ class MyWallpaperService : GLWallpaperService() {
             val y = (random.nextFloat() - 0.5f) * range * 4
             val z = if (randomZ) random.nextFloat() * maxDepth else maxDepth
             
-            val star = Star(x, y, z)
+            // Chaos parameters
+            val twistPhase = random.nextFloat() * Math.PI.toFloat() * 2f
+            val twistFreq = 0.5f + random.nextFloat() * 1.0f  // 0.5 to 1.5
+            val radialOsc = random.nextFloat() * Math.PI.toFloat() * 2f
+            
+            val star = Star(x, y, z, Color.WHITE, twistPhase, twistFreq, radialOsc)
             
             star.color = if (theme == "scifi") {
                  val r = random.nextFloat()
@@ -151,7 +156,13 @@ class MyWallpaperService : GLWallpaperService() {
             star.x = (random.nextFloat() - 0.5f) * range * 4
             star.y = (random.nextFloat() - 0.5f) * range * 4
             star.z = maxDepth
-             star.color = if (theme == "scifi") {
+            
+            // Re-randomize chaos parameters
+            star.twistPhase = random.nextFloat() * Math.PI.toFloat() * 2f
+            star.twistFreq = 0.5f + random.nextFloat() * 1.0f
+            star.radialOscillation = random.nextFloat() * Math.PI.toFloat() * 2f
+            
+            star.color = if (theme == "scifi") {
                  val r = random.nextFloat()
                  when {
                      r < 0.33f -> Color.CYAN
@@ -253,77 +264,60 @@ class MyWallpaperService : GLWallpaperService() {
             
             val aspectRatio = if (height > 0) width.toFloat() / height.toFloat() else 1f
 
-            val twistBase = 0.003f 
-            // "Flower" parameters
-            val waveFreq = 0.01f // Frequency of the spiral wave along Z
-            val waveAmp = 0.5f   // Amplitude of the wave (radians)
+            val twistBase = 0.002f  // Reduced slightly to prevent over-twisting
+            val waveFreq = 0.01f
+            val waveAmp = 1.2f   // Increased for more chaos
             
-            // Tail Length: Total length of the snake
             val totalTailLength = if (currentSpeed > baseSpeed) 600f else 300f
             val segmentLen = totalTailLength / SEGMENTS
             
             for (star in stars) {
                 if (star.z <= 0) continue
                 
-                // Pre-calculate colors
                 val r = Color.red(star.color) / 255f
                 val g = Color.green(star.color) / 255f
                 val b = Color.blue(star.color) / 255f
-                
-                var prevX = 0f
-                var prevY = 0f
-                var firstPoint = true // Flag to start the chain
-                
-                // We generate points (Vertices). GL_LINES needs pairs: (P0, P1), (P1, P2), (P2, P3)...
-                // So for N segments, we calculate N+1 points.
-                // Or better: Iterate segments 0..N-1.
-                //   Calculate Point A (at z)
-                //   Calculate Point B (at z + len)
-                // This connects perfectly if math is continuous.
                 
                 for (i in 0 until SEGMENTS) {
                     val zHead = star.z + i * segmentLen
                     val zTail = star.z + (i + 1) * segmentLen
                     
-                    // --- Project Point A (Head of Segment) ---
-                    // Twist + Wave
-                    val twistA = (maxDepth - zHead) * twistBase + time
+                    // --- Point A (Head) with Chaos ---
+                    val twistA = (maxDepth - zHead) * twistBase * star.twistFreq + time + star.twistPhase
                     val waveA = Math.sin((zHead * waveFreq + time).toDouble()).toFloat() * waveAmp
                     val angleA = twistA + waveA
+                    
+                    // Radial oscillation (breathing)
+                    val radiusModA = 1f + Math.sin((zHead * 0.005f + star.radialOscillation).toDouble()).toFloat() * 0.3f
                     
                     val cosA = Math.cos(angleA.toDouble()).toFloat()
                     val sinA = Math.sin(angleA.toDouble()).toFloat()
                     
-                    // Modulate Radius? (Breathing tunnel)
-                    // radiusMod = 1.0 + 0.2 * sin(z) ... 
-                    
-                    val rxA = star.x * cosA - star.y * sinA
-                    val ryA = star.x * sinA + star.y * cosA
+                    val rxA = star.x * radiusModA * cosA - star.y * radiusModA * sinA
+                    val ryA = star.x * radiusModA * sinA + star.y * radiusModA * cosA
                     
                     val kA = 1.5f / zHead
                     val xA = rxA * kA / aspectRatio
                     val yA = ryA * kA
                     
-                    // --- Project Point B (Tail of Segment) ---
-                    val twistB = (maxDepth - zTail) * twistBase + time
+                    // --- Point B (Tail) with Chaos ---
+                    val twistB = (maxDepth - zTail) * twistBase * star.twistFreq + time + star.twistPhase
                     val waveB = Math.sin((zTail * waveFreq + time).toDouble()).toFloat() * waveAmp
                     val angleB = twistB + waveB
+                    
+                    val radiusModB = 1f + Math.sin((zTail * 0.005f + star.radialOscillation).toDouble()).toFloat() * 0.3f
                     
                     val cosB = Math.cos(angleB.toDouble()).toFloat()
                     val sinB = Math.sin(angleB.toDouble()).toFloat()
                     
-                    val rxB = star.x * cosB - star.y * sinB
-                    val ryB = star.x * sinB + star.y * cosB
+                    val rxB = star.x * radiusModB * cosB - star.y * radiusModB * sinB
+                    val ryB = star.x * radiusModB * sinB + star.y * radiusModB * cosB
                     
                     val kB = 1.5f / zTail
                     val xB = rxB * kB / aspectRatio
                     val yB = ryB * kB
 
-                    // Cull logic (Optional): If both out of bounds...
-                    
-                    // Alpha gradient along the snake
-                    // Head of snake (i=0) is brightest. Tail (i=SEGMENTS) is dim.
-                    // Also distance fade.
+                    // Alpha gradient
                     val distFade = (1f - (zHead / maxDepth)).coerceIn(0f, 1f)
                     val segFadeHead = 1f - (i.toFloat() / SEGMENTS)
                     val segFadeTail = 1f - ((i + 1).toFloat() / SEGMENTS)
@@ -331,7 +325,7 @@ class MyWallpaperService : GLWallpaperService() {
                     val alphaA = distFade * segFadeHead
                     val alphaB = distFade * segFadeTail
                     
-                    // Add Line Segment (A -> B)
+                    // Add segment
                     lineCoords[idxPos++] = xA
                     lineCoords[idxPos++] = yA
                     lineColors[idxCol++] = r; lineColors[idxCol++] = g; lineColors[idxCol++] = b; lineColors[idxCol++] = alphaA
