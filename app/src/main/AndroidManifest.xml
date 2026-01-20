@@ -39,7 +39,7 @@
             android:name=".SettingsActivity"
             android:label="Settings"
             android:exported="true"
-            android:theme="@style/Theme.MyWallpaperServicekt" />
+            android:theme="@style/Theme.Transparent" />
     </application>
 
 </manifest>
