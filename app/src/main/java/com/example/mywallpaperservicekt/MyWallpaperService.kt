@@ -3,6 +3,10 @@ package com.example.mywallpaperservicekt
 import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Color
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.opengl.GLES20
 import android.util.Log
 import android.view.MotionEvent
@@ -11,362 +15,340 @@ import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.ArrayList
 import java.util.Random
+import kotlin.math.*
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 class MyWallpaperService : GLWallpaperService() {
 
     override fun getNewRenderer(): Renderer {
-        return HyperRenderer(this)
+        return EnergyBurstRenderer(this)
     }
 
-    inner class HyperRenderer(context: Context) : Renderer, SharedPreferences.OnSharedPreferenceChangeListener {
+    inner class EnergyBurstRenderer(private val context: Context) : Renderer, 
+        SharedPreferences.OnSharedPreferenceChangeListener, SensorEventListener {
         
-        // --- Shaders ---
+        // ============== SHADERS ==============
+        
+        // V12 Energy Burst Vertex Shader
         private val vertexShaderCode = """
-            attribute vec4 aPosition;
+            attribute vec3 aDirection;
+            attribute vec4 aData;
             attribute vec4 aColor;
+            attribute float aLayer;
+            
+            uniform float uTime;
+            uniform float uPulse; // V12: Energy pulse
+            uniform vec2 uParallax;
+            uniform float uAspectRatio;
+            
             varying vec4 vColor;
+            varying float vType;
+            varying float vAngle;
+            
+            vec3 rotateX(vec3 p, float a) {
+                float s = sin(a);
+                float c = cos(a);
+                return vec3(p.x, p.y * c - p.z * s, p.y * s + p.z * c);
+            }
+            
+            vec3 rotateY(vec3 p, float a) {
+                float s = sin(a);
+                float c = cos(a);
+                return vec3(p.x * c + p.z * s, p.y, -p.x * s + p.z * c);
+            }
+            
             void main() {
-                gl_Position = aPosition;
-                vColor = aColor;
+                float offset = aData.x;
+                float speed = aData.y;
+                float size = aData.z;
+                vType = aData.w;
+                
+                // Continuous radial burst
+                float t = fract(uTime * speed * 0.15 + offset);
+                
+                // Exponential flow: starts slow near core, accelerates outward
+                // V12: Pulse affects distance near the core
+                float dist = pow(t, 2.5) * 5.0 + (1.0 - t) * uPulse * 0.1; 
+                
+                vec3 pos = aDirection * dist;
+                
+                // Layered Parallax: Closer layers (0.0) move more, FAR layers (1.0) move least
+                float parallaxScale = (1.0 - aLayer) * 0.8; 
+                pos = rotateY(pos, uParallax.x * parallaxScale);
+                pos = rotateX(pos, uParallax.y * parallaxScale);
+                
+                // Project
+                float z = pos.z + 3.0; // View distance
+                if (z < 0.1) z = 0.1;
+                
+                gl_Position = vec4(pos.x / uAspectRatio, pos.y, 0.0, z);
+                
+                // Point size attenuation + Pulse swell
+                gl_PointSize = size * (4.0 / z) * (1.0 + (1.0 - t) * uPulse * 0.3);
+                
+                // Angle for fragment shader orientation (Points to movement direction)
+                vAngle = atan(aDirection.y, aDirection.x);
+                
+                // Fade logic: High alpha near center (t=0), fades out at edges
+                float alpha = 1.0;
+                if (t < 0.1) alpha = t * 10.0; // Fade in from core
+                if (t > 0.7) alpha = 1.0 - (t - 0.7) * 3.3; // Fade out at boundary
+                
+                // Brightness boost for center "Core" + Jitter
+                float jitter = sin(uTime * 10.0 + offset * 100.0) * 0.1;
+                float brightness = 1.0 + (1.0 - t) * 0.8 + jitter;
+                vColor = vec4(aColor.rgb * brightness, aColor.a * alpha);
             }
         """.trimIndent()
 
         private val fragmentShaderCode = """
             precision mediump float;
             varying vec4 vColor;
+            varying float vType;
+            varying float vAngle;
+            
             void main() {
-                gl_FragColor = vColor;
+                vec2 coord = gl_PointCoord - vec2(0.5);
+                
+                // Rotate coord based on movement direction
+                float s = sin(vAngle);
+                float c = cos(vAngle);
+                vec2 rotatedCoord = vec2(coord.x * c + coord.y * s, -coord.x * s + coord.y * c);
+                
+                float mask = 0.0;
+                
+                if (vType < 0.5) { 
+                    // Type 0: Shard (Jagged diamond/pentagon mix)
+                    float angle = atan(rotatedCoord.y, rotatedCoord.x);
+                    float deform = sin(angle * 5.0) * 0.1; // 5-sided jitter
+                    float d = length(rotatedCoord) + deform;
+                    mask = 1.0 - smoothstep(0.3, 0.45, d);
+                } else if (vType < 1.5) {
+                    // Type 1: Short Line
+                    float d = abs(rotatedCoord.y) * 4.0 + abs(rotatedCoord.x);
+                    mask = 1.0 - smoothstep(0.2, 0.4, d);
+                } else {
+                    // Type 2: Elongated Streak
+                    float d = abs(rotatedCoord.y) * 8.0 + abs(rotatedCoord.x) * 0.5;
+                    mask = 1.0 - smoothstep(0.2, 0.5, d);
+                }
+                
+                if (mask < 0.01) discard;
+                gl_FragColor = vec4(vColor.rgb, vColor.a * mask);
             }
         """.trimIndent()
         
-        private var programId = 0
+        // ============== DATA ==============
         
-        // --- Data ---
-        private val stars = ArrayList<Star>()
-        private var numStars = 400
-        private var width = 0
-        private var height = 0
-        private val random = Random()
+        private val NUM_PARTICLES = 4000
+        private var particleProgram = 0
         
-        // Buffer arrays (reused)
-        private lateinit var lineCoords: FloatArray
-        private lateinit var lineColors: FloatArray
-
-        // --- Settings ---
+        private var directionBuffer: FloatBuffer? = null
+        private var dataBuffer: FloatBuffer? = null // offset, speed, size, type
+        private var colorBuffer: FloatBuffer? = null
+        private var layerBuffer: FloatBuffer? = null
+        
+        private var time = 0f
+        private var aspectRatio = 1f
+        
+        private var baseSpeed = 0.08f
+        private var warpSpeed = 0.35f
+        private var currentSpeed = 0.08f
+        
+        private var sensorManager: SensorManager? = null
+        private var gyroscope: Sensor? = null
+        private var parallaxX = 0f
+        private var parallaxY = 0f
+        private var targetParallaxX = 0f
+        private var targetParallaxY = 0f
+        
         private var prefs: SharedPreferences = context.getSharedPreferences("hyperjump_prefs", Context.MODE_PRIVATE)
-        private var baseSpeed = 12f
-        private var currentSpeed = 12f
-        private var warpSpeed = 60f
-        private val maxDepth = 2500f
-        private var theme = "scifi"
-        
-        // Colors
-        private val cyan = floatArrayOf(0f, 1f, 1f, 1f)
-        private val magenta = floatArrayOf(1f, 0f, 1f, 1f)
-        private val electricBlue = floatArrayOf(0f, 0.47f, 1f, 1f)
-        private val white = floatArrayOf(1f, 1f, 1f, 1f)
         
         init {
             prefs.registerOnSharedPreferenceChangeListener(this)
-            updateSettings()
-            createStars()
+            generateParticles()
+            
+            sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
+            gyroscope = sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
         }
 
-        // Multi-segment settings
-        private val SEGMENTS = 16 
-        
-        
-        // Settings State
-        private var settingsDirty = true
-        private var targetStarCount = 400
-        private var targetTheme = "scifi"
-        
-        // Buffers
-        private var vertexBuffer: FloatBuffer? = null
-        private var colorBuffer: FloatBuffer? = null
-
-        private fun updateSettings() {
-            // ONLY update primitives here. Defer heavy lifting to GL Thread.
-            targetStarCount = prefs.getInt("star_count", 400)
-            targetTheme = prefs.getString("theme", "scifi") ?: "scifi"
-            settingsDirty = true
-        }
-        
-        // Called on GL Thread
-        private fun applySettings() {
-            numStars = targetStarCount
-            theme = targetTheme
+        private fun generateParticles() {
+            val dirData = FloatArray(NUM_PARTICLES * 3)
+            val infoData = FloatArray(NUM_PARTICLES * 4)
+            val colData = FloatArray(NUM_PARTICLES * 4)
+            val lyrData = FloatArray(NUM_PARTICLES)
             
-            val totalVerts = numStars * SEGMENTS * 2
-            // Resize arrays
-            lineCoords = FloatArray(totalVerts * 2) 
-            lineColors = FloatArray(totalVerts * 4) 
+            val random = kotlin.random.Random(System.currentTimeMillis())
             
-            // Resize Native Buffers (Avoid allocation every frame)
-            val vBb = ByteBuffer.allocateDirect(lineCoords.size * 4)
-            vBb.order(ByteOrder.nativeOrder())
-            vertexBuffer = vBb.asFloatBuffer()
+            val colors = listOf(
+                Color.rgb(0, 200, 255),   // Cyan
+                Color.rgb(80, 100, 255),  // Blue
+                Color.rgb(200, 50, 255),  // Purple
+                Color.rgb(255, 50, 120),  // Pink/Magenta
+                Color.rgb(255, 80, 50)    // Red/Orange
+            )
             
-            val cBb = ByteBuffer.allocateDirect(lineColors.size * 4)
-            cBb.order(ByteOrder.nativeOrder())
-            colorBuffer = cBb.asFloatBuffer()
-            
-            // Re-create stars safely
-            createStars()
-            settingsDirty = false
-        }
-        
-        private fun createStars() {
-            stars.clear()
-            for (i in 0 until numStars) {
-                stars.add(createRandomStar(true))
+            for (i in 0 until NUM_PARTICLES) {
+                // Radial Directions
+                val phi = random.nextFloat() * PI.toFloat() * 2f
+                val theta = acos(random.nextDouble() * 2.0 - 1.0).toFloat()
+                
+                dirData[i*3+0] = sin(theta.toDouble()).toFloat() * cos(phi.toDouble()).toFloat()
+                dirData[i*3+1] = sin(theta.toDouble()).toFloat() * sin(phi.toDouble()).toFloat()
+                dirData[i*3+2] = cos(theta.toDouble()).toFloat()
+                
+                // Layers: 0 (Near) to 1 (Far/Core)
+                val layer = random.nextFloat()
+                lyrData[i] = layer
+                
+                // Correlate: Near particles are faster and larger
+                val nearMultiplier = 1.0f - layer 
+                
+                infoData[i*4+0] = random.nextFloat() // Offset
+                infoData[i*4+1] = 0.5f + nearMultiplier * 1.5f // Speed correlation
+                infoData[i*4+2] = 2.0f + nearMultiplier * 15.0f // Size correlation
+                infoData[i*4+3] = random.nextInt(3).toFloat() // Type (0, 1, 2)
+                
+                // Colors
+                val c = colors.random()
+                colData[i*4+0] = Color.red(c) / 255f
+                colData[i*4+1] = Color.green(c) / 255f
+                colData[i*4+2] = Color.blue(c) / 255f
+                colData[i*4+3] = 1.0f
             }
-        }
-        
-        private fun createRandomStar(randomZ: Boolean): Star {
-            val range = 2000f 
-            val x = (random.nextFloat() - 0.5f) * range * 4 
-            val y = (random.nextFloat() - 0.5f) * range * 4
-            val z = if (randomZ) random.nextFloat() * maxDepth else maxDepth
             
-            // Chaos parameters
-            val twistPhase = random.nextFloat() * Math.PI.toFloat() * 2f
-            val twistFreq = 0.5f + random.nextFloat() * 1.0f  // 0.5 to 1.5
-            val radialOsc = random.nextFloat() * Math.PI.toFloat() * 2f
+            directionBuffer = ByteBuffer.allocateDirect(dirData.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().put(dirData)
+            directionBuffer?.position(0)
             
-            val star = Star(x, y, z, Color.WHITE, twistPhase, twistFreq, radialOsc)
+            dataBuffer = ByteBuffer.allocateDirect(infoData.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().put(infoData)
+            dataBuffer?.position(0)
             
-            star.color = if (theme == "scifi") {
-                 val r = random.nextFloat()
-                 when {
-                     r < 0.33f -> Color.CYAN
-                     r < 0.66f -> Color.MAGENTA
-                     else -> Color.rgb(0, 100, 255) // Blue
-                 }
-            } else {
-                Color.WHITE
-            }
-            return star
-        }
-        
-        private fun resetStar(star: Star) {
-            val range = 2000f
-            star.x = (random.nextFloat() - 0.5f) * range * 4
-            star.y = (random.nextFloat() - 0.5f) * range * 4
-            star.z = maxDepth
+            colorBuffer = ByteBuffer.allocateDirect(colData.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().put(colData)
+            colorBuffer?.position(0)
             
-            // Re-randomize chaos parameters
-            star.twistPhase = random.nextFloat() * Math.PI.toFloat() * 2f
-            star.twistFreq = 0.5f + random.nextFloat() * 1.0f
-            star.radialOscillation = random.nextFloat() * Math.PI.toFloat() * 2f
-            
-            star.color = if (theme == "scifi") {
-                 val r = random.nextFloat()
-                 when {
-                     r < 0.33f -> Color.CYAN
-                     r < 0.66f -> Color.MAGENTA
-                     else -> Color.rgb(0, 100, 255)
-                 }
-            } else {
-                Color.WHITE
-            }
+            layerBuffer = ByteBuffer.allocateDirect(lyrData.size * 4).order(ByteOrder.nativeOrder()).asFloatBuffer().put(lyrData)
+            layerBuffer?.position(0)
         }
 
-        override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences?, key: String?) {
-            updateSettings()
-        }
+        override fun onSharedPreferenceChanged(sharedPreferences: SharedPreferences?, key: String?) {}
 
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-            GLES20.glClearColor(0f, 0f, 0f, 1f)
-            
-            val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, vertexShaderCode)
-            val fragmentShader = loadShader(GLES20.GL_FRAGMENT_SHADER, fragmentShaderCode)
-
-            programId = GLES20.glCreateProgram()
-            GLES20.glAttachShader(programId, vertexShader)
-            GLES20.glAttachShader(programId, fragmentShader)
-            GLES20.glLinkProgram(programId)
-            
-            // Force init
-            settingsDirty = true
+            GLES20.glClearColor(0.0f, 0.0f, 0.02f, 1f) 
+            particleProgram = createProgram(vertexShaderCode, fragmentShaderCode)
+            gyroscope?.let { sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_GAME) }
         }
 
-        override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
-            this.width = width
-            this.height = height
-            GLES20.glViewport(0, 0, width, height)
+        override fun onSurfaceChanged(gl: GL10?, w: Int, h: Int) {
+            aspectRatio = w.toFloat() / h.toFloat()
+            GLES20.glViewport(0, 0, w, h)
         }
         
-        // --- Main Loop ---
         fun setWarp(active: Boolean) {
             currentSpeed = if (active) warpSpeed else baseSpeed
         }
-        
-        private var time = 0f
 
         override fun onDrawFrame(gl: GL10?) {
-             if (settingsDirty) {
-                 applySettings()
-             }
-        
-             updateStars()
-             fillBuffers()
-             
-             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-             GLES20.glUseProgram(programId)
-             
-             // Update Native Buffers from Arrays
-             vertexBuffer?.put(lineCoords)?.position(0)
-             colorBuffer?.put(lineColors)?.position(0)
-             
-             val positionHandle = GLES20.glGetAttribLocation(programId, "aPosition")
-             GLES20.glEnableVertexAttribArray(positionHandle)
-             GLES20.glVertexAttribPointer(positionHandle, 2, GLES20.GL_FLOAT, false, 0, vertexBuffer)
-             
-             val colorHandle = GLES20.glGetAttribLocation(programId, "aColor")
-             GLES20.glEnableVertexAttribArray(colorHandle)
-             GLES20.glVertexAttribPointer(colorHandle, 4, GLES20.GL_FLOAT, false, 0, colorBuffer)
-             
-             // Bloom Pass (V11 Glow)
-             GLES20.glEnable(GLES20.GL_BLEND)
-             GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE) 
-             
-             val count = numStars * SEGMENTS * 2
-             
-             GLES20.glLineWidth(12f) 
-             GLES20.glDrawArrays(GLES20.GL_LINES, 0, count)
-             
-             // Core Pass
-             GLES20.glLineWidth(3f)
-             GLES20.glDrawArrays(GLES20.GL_LINES, 0, count)
-             
-             GLES20.glDisableVertexAttribArray(positionHandle)
-             GLES20.glDisableVertexAttribArray(colorHandle)
-             GLES20.glDisable(GLES20.GL_BLEND)
+            // Speed pulsation: subtle breathing rhythm
+            val pulseSpeed = currentSpeed * (1.0f + sin(time * 0.5f) * 0.15f)
+            time += (pulseSpeed * 0.1f)
+            
+            parallaxX += (targetParallaxX - parallaxX) * 0.08f
+            parallaxY += (targetParallaxY - parallaxY) * 0.08f
+            
+            GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
+            GLES20.glEnable(GLES20.GL_BLEND)
+            GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE) 
+            
+            GLES20.glUseProgram(particleProgram)
+            
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(particleProgram, "uTime"), time)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(particleProgram, "uPulse"), sin(time * 2.0f) * 0.5f + 0.5f)
+            GLES20.glUniform1f(GLES20.glGetUniformLocation(particleProgram, "uAspectRatio"), aspectRatio)
+            GLES20.glUniform2f(GLES20.glGetUniformLocation(particleProgram, "uParallax"), parallaxX, parallaxY)
+            
+            val dirHandle = GLES20.glGetAttribLocation(particleProgram, "aDirection")
+            GLES20.glEnableVertexAttribArray(dirHandle)
+            GLES20.glVertexAttribPointer(dirHandle, 3, GLES20.GL_FLOAT, false, 0, directionBuffer)
+            
+            val dataHandle = GLES20.glGetAttribLocation(particleProgram, "aData")
+            GLES20.glEnableVertexAttribArray(dataHandle)
+            GLES20.glVertexAttribPointer(dataHandle, 4, GLES20.GL_FLOAT, false, 0, dataBuffer)
+            
+            val colHandle = GLES20.glGetAttribLocation(particleProgram, "aColor")
+            GLES20.glEnableVertexAttribArray(colHandle)
+            GLES20.glVertexAttribPointer(colHandle, 4, GLES20.GL_FLOAT, false, 0, colorBuffer)
+            
+            val lyrHandle = GLES20.glGetAttribLocation(particleProgram, "aLayer")
+            GLES20.glEnableVertexAttribArray(lyrHandle)
+            GLES20.glVertexAttribPointer(lyrHandle, 1, GLES20.GL_FLOAT, false, 0, layerBuffer)
+            
+            GLES20.glDrawArrays(GLES20.GL_POINTS, 0, NUM_PARTICLES)
+            
+            GLES20.glDisableVertexAttribArray(dirHandle)
+            GLES20.glDisableVertexAttribArray(dataHandle)
+            GLES20.glDisableVertexAttribArray(colHandle)
+            GLES20.glDisableVertexAttribArray(lyrHandle)
+            GLES20.glDisable(GLES20.GL_BLEND)
         }
-        
-        private fun updateStars() {
-            if (currentSpeed > baseSpeed && (currentSpeed < warpSpeed)) {
-            }
-            time += 0.01f * (currentSpeed / 10f)
-            
-            for (star in stars) {
-                star.z -= currentSpeed
-                if (star.z <= 0) resetStar(star)
-            }
-        }
-        
-        private fun fillBuffers() {
-            var idxPos = 0
-            var idxCol = 0
-            
-            val aspectRatio = if (height > 0) width.toFloat() / height.toFloat() else 1f
 
-            val twistBase = 0.003f  // V11: Increased spiral twist
-            val waveFreq = 0.008f
-            val waveAmp = 1.5f      // V11: More chaotic waves
-            
-            val totalTailLength = if (currentSpeed > baseSpeed) 800f else 400f
-            val segmentLen = totalTailLength / SEGMENTS
-            
-            for (star in stars) {
-                if (star.z <= 0) continue
-                
-                val r = Color.red(star.color) / 255f
-                val g = Color.green(star.color) / 255f
-                val b = Color.blue(star.color) / 255f
-                
-                for (i in 0 until SEGMENTS) {
-                    val zHead = star.z + i * segmentLen
-                    val zTail = star.z + (i + 1) * segmentLen
-                    
-                    // --- Point A (Head) ---
-                    // V11: Exponential convergence for better tunnel depth
-                    val twistA = (maxDepth - zHead) * twistBase * star.twistFreq + time + star.twistPhase
-                    val waveA = Math.sin((zHead * waveFreq + time).toDouble()).toFloat() * waveAmp
-                    val angleA = twistA + waveA
-                    
-                    val radiusModA = 1f + Math.sin((zHead * 0.004f + star.radialOscillation).toDouble()).toFloat() * 0.4f
-                    
-                    val cosA = Math.cos(angleA.toDouble()).toFloat()
-                    val sinA = Math.sin(angleA.toDouble()).toFloat()
-                    
-                    val rxA = star.x * radiusModA * cosA - star.y * radiusModA * sinA
-                    val ryA = star.x * radiusModA * sinA + star.y * radiusModA * cosA
-                    
-                    // V11: Perspective 'k' factor creates the tunnel window
-                    val kA = 2.0f / zHead
-                    val xA = rxA * kA / aspectRatio
-                    val yA = ryA * kA
-                    
-                    // --- Point B (Tail) ---
-                    val twistB = (maxDepth - zTail) * twistBase * star.twistFreq + time + star.twistPhase
-                    val waveB = Math.sin((zTail * waveFreq + time).toDouble()).toFloat() * waveAmp
-                    val angleB = twistB + waveB
-                    
-                    val radiusModB = 1f + Math.sin((zTail * 0.004f + star.radialOscillation).toDouble()).toFloat() * 0.4f
-                    
-                    val cosB = Math.cos(angleB.toDouble()).toFloat()
-                    val sinB = Math.sin(angleB.toDouble()).toFloat()
-                    
-                    val rxB = star.x * radiusModB * cosB - star.y * radiusModB * sinB
-                    val ryB = star.x * radiusModB * sinB + star.y * radiusModB * cosB
-                    
-                    val kB = 2.0f / zTail
-                    val xB = rxB * kB / aspectRatio
-                    val yB = ryB * kB
-
-                    // V11 Alpha: Enhanced depth fading
-                    val distFade = (1f - (zHead / maxDepth)).pow(1.5f).coerceIn(0f, 1f)
-                    val segFadeHead = (1f - (i.toFloat() / SEGMENTS)).pow(0.8f)
-                    val segFadeTail = (1f - ((i + 1).toFloat() / SEGMENTS)).pow(0.8f)
-                    
-                    val alphaA = distFade * segFadeHead
-                    val alphaB = distFade * segFadeTail
-                    
-                    // Add segment
-                    lineCoords[idxPos++] = xA
-                    lineCoords[idxPos++] = yA
-                    lineColors[idxCol++] = r; lineColors[idxCol++] = g; lineColors[idxCol++] = b; lineColors[idxCol++] = alphaA
-                    
-                    lineCoords[idxPos++] = xB
-                    lineCoords[idxPos++] = yB
-                    lineColors[idxCol++] = r; lineColors[idxCol++] = g; lineColors[idxCol++] = b; lineColors[idxCol++] = alphaB
+        override fun onSensorChanged(event: SensorEvent?) {
+            event?.let {
+                if (it.sensor.type == Sensor.TYPE_GYROSCOPE) {
+                    targetParallaxX += it.values[1] * 0.12f
+                    targetParallaxY += it.values[0] * 0.12f
+                    targetParallaxX = targetParallaxX.coerceIn(-0.6f, 0.6f)
+                    targetParallaxY = targetParallaxY.coerceIn(-0.6f, 0.6f)
                 }
             }
         }
 
-        private fun loadShader(type: Int, shaderCode: String): Int {
-            val shader = GLES20.glCreateShader(type)
-            GLES20.glShaderSource(shader, shaderCode)
-            GLES20.glCompileShader(shader)
-            
-            val compileStatus = IntArray(1)
-            GLES20.glGetShaderiv(shader, GLES20.GL_COMPILE_STATUS, compileStatus, 0)
-            if (compileStatus[0] == 0) {
-                 GLES20.glDeleteShader(shader)
-                return 0
-            }
-            return shader
+        override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
+        private fun createProgram(vertexSource: String, fragmentSource: String): Int {
+            val vs = loadShader(GLES20.GL_VERTEX_SHADER, vertexSource)
+            val fs = loadShader(GLES20.GL_FRAGMENT_SHADER, fragmentSource)
+            val prog = GLES20.glCreateProgram()
+            GLES20.glAttachShader(prog, vs)
+            GLES20.glAttachShader(prog, fs)
+            GLES20.glLinkProgram(prog)
+            return prog
+        }
+        
+        private fun loadShader(type: Int, src: String): Int {
+            val s = GLES20.glCreateShader(type)
+            GLES20.glShaderSource(s, src)
+            GLES20.glCompileShader(s)
+            val compiled = IntArray(1)
+            GLES20.glGetShaderiv(s, GLES20.GL_COMPILE_STATUS, compiled, 0)
+            if (compiled[0] == 0) Log.e("V12", "Compile Error: ${GLES20.glGetShaderInfoLog(s)}")
+            return s
+        }
+        
+        fun cleanup() {
+            sensorManager?.unregisterListener(this)
         }
     }
     
     override fun onCreateEngine(): Engine {
-        return HyperEngine()
+        return EnergyEngine()
     }
     
-    inner class HyperEngine : GLWallpaperService.GLEngine() {
-         override fun onTouchEvent(event: MotionEvent?) {
-             super.onTouchEvent(event)
-             if (renderer is HyperRenderer) {
-                 val r = renderer as HyperRenderer
-                 when (event?.action) {
+    inner class EnergyEngine : GLWallpaperService.GLEngine() {
+        override fun onTouchEvent(event: MotionEvent?) {
+            super.onTouchEvent(event)
+            if (renderer is EnergyBurstRenderer) {
+                val r = renderer as EnergyBurstRenderer
+                when (event?.action) {
                     MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE -> r.setWarp(true)
                     MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> r.setWarp(false)
-                 }
-             }
-         }
+                }
+            }
+        }
+        
+        override fun onVisibilityChanged(visible: Boolean) {
+            super.onVisibilityChanged(visible)
+            if (!visible && renderer is EnergyBurstRenderer) (renderer as EnergyBurstRenderer).cleanup()
+        }
     }
 }

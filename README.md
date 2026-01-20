@@ -1,13 +1,10 @@
-# HyperJump Live Wallpaper
-
-Android live wallpaper with OpenGL ES 2.0 rendering engine.
+# HyperJump- **V12 - Energy Burst (Current)**: High-performance GPU-based radial flow. Thousands of fragments (shards, lines, streaks) with layered parallax and a fixed core.
 
 ## Versions
-
-### V1 - Centrifuge (Current)
-- Multi-segment snake trails (12 segments per star)
-- Sinusoidal spiral warping
-- Bloom effect with dual-pass rendering
+- **V11 - Light Tunnel Evolved**: Spiral tunnel with 1000+ segments. (Archived/Tagged)
+- **V9 - Chaos**: Multi-segment snake trails. (Baseline)
+- **V1 - Centrifuge**: Basic radial burst.
+rendering
 - Configurable FPS, star count, and color themes
 
 ## Building
