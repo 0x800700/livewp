@@ -56,10 +56,10 @@ class MyWallpaperService : GLWallpaperService() {
 
         // --- Settings ---
         private var prefs: SharedPreferences = context.getSharedPreferences("hyperjump_prefs", Context.MODE_PRIVATE)
-        private var baseSpeed = 10f
-        private var currentSpeed = 10f
-        private var warpSpeed = 50f
-        private val maxDepth = 2000f
+        private var baseSpeed = 12f
+        private var currentSpeed = 12f
+        private var warpSpeed = 60f
+        private val maxDepth = 2500f
         private var theme = "scifi"
         
         // Colors
@@ -75,7 +75,7 @@ class MyWallpaperService : GLWallpaperService() {
         }
 
         // Multi-segment settings
-        private val SEGMENTS = 12 
+        private val SEGMENTS = 16 
         
         
         // Settings State
@@ -229,17 +229,17 @@ class MyWallpaperService : GLWallpaperService() {
              GLES20.glEnableVertexAttribArray(colorHandle)
              GLES20.glVertexAttribPointer(colorHandle, 4, GLES20.GL_FLOAT, false, 0, colorBuffer)
              
-             // Bloom Pass
+             // Bloom Pass (V11 Glow)
              GLES20.glEnable(GLES20.GL_BLEND)
              GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE) 
              
              val count = numStars * SEGMENTS * 2
              
-             GLES20.glLineWidth(8f) 
+             GLES20.glLineWidth(12f) 
              GLES20.glDrawArrays(GLES20.GL_LINES, 0, count)
              
              // Core Pass
-             GLES20.glLineWidth(2f)
+             GLES20.glLineWidth(3f)
              GLES20.glDrawArrays(GLES20.GL_LINES, 0, count)
              
              GLES20.glDisableVertexAttribArray(positionHandle)
@@ -264,11 +264,11 @@ class MyWallpaperService : GLWallpaperService() {
             
             val aspectRatio = if (height > 0) width.toFloat() / height.toFloat() else 1f
 
-            val twistBase = 0.002f  // Reduced slightly to prevent over-twisting
-            val waveFreq = 0.01f
-            val waveAmp = 1.2f   // Increased for more chaos
+            val twistBase = 0.003f  // V11: Increased spiral twist
+            val waveFreq = 0.008f
+            val waveAmp = 1.5f      // V11: More chaotic waves
             
-            val totalTailLength = if (currentSpeed > baseSpeed) 600f else 300f
+            val totalTailLength = if (currentSpeed > baseSpeed) 800f else 400f
             val segmentLen = totalTailLength / SEGMENTS
             
             for (star in stars) {
@@ -282,13 +282,13 @@ class MyWallpaperService : GLWallpaperService() {
                     val zHead = star.z + i * segmentLen
                     val zTail = star.z + (i + 1) * segmentLen
                     
-                    // --- Point A (Head) with Chaos ---
+                    // --- Point A (Head) ---
+                    // V11: Exponential convergence for better tunnel depth
                     val twistA = (maxDepth - zHead) * twistBase * star.twistFreq + time + star.twistPhase
                     val waveA = Math.sin((zHead * waveFreq + time).toDouble()).toFloat() * waveAmp
                     val angleA = twistA + waveA
                     
-                    // Radial oscillation (breathing)
-                    val radiusModA = 1f + Math.sin((zHead * 0.005f + star.radialOscillation).toDouble()).toFloat() * 0.3f
+                    val radiusModA = 1f + Math.sin((zHead * 0.004f + star.radialOscillation).toDouble()).toFloat() * 0.4f
                     
                     val cosA = Math.cos(angleA.toDouble()).toFloat()
                     val sinA = Math.sin(angleA.toDouble()).toFloat()
@@ -296,16 +296,17 @@ class MyWallpaperService : GLWallpaperService() {
                     val rxA = star.x * radiusModA * cosA - star.y * radiusModA * sinA
                     val ryA = star.x * radiusModA * sinA + star.y * radiusModA * cosA
                     
-                    val kA = 1.5f / zHead
+                    // V11: Perspective 'k' factor creates the tunnel window
+                    val kA = 2.0f / zHead
                     val xA = rxA * kA / aspectRatio
                     val yA = ryA * kA
                     
-                    // --- Point B (Tail) with Chaos ---
+                    // --- Point B (Tail) ---
                     val twistB = (maxDepth - zTail) * twistBase * star.twistFreq + time + star.twistPhase
                     val waveB = Math.sin((zTail * waveFreq + time).toDouble()).toFloat() * waveAmp
                     val angleB = twistB + waveB
                     
-                    val radiusModB = 1f + Math.sin((zTail * 0.005f + star.radialOscillation).toDouble()).toFloat() * 0.3f
+                    val radiusModB = 1f + Math.sin((zTail * 0.004f + star.radialOscillation).toDouble()).toFloat() * 0.4f
                     
                     val cosB = Math.cos(angleB.toDouble()).toFloat()
                     val sinB = Math.sin(angleB.toDouble()).toFloat()
@@ -313,14 +314,14 @@ class MyWallpaperService : GLWallpaperService() {
                     val rxB = star.x * radiusModB * cosB - star.y * radiusModB * sinB
                     val ryB = star.x * radiusModB * sinB + star.y * radiusModB * cosB
                     
-                    val kB = 1.5f / zTail
+                    val kB = 2.0f / zTail
                     val xB = rxB * kB / aspectRatio
                     val yB = ryB * kB
 
-                    // Alpha gradient
-                    val distFade = (1f - (zHead / maxDepth)).coerceIn(0f, 1f)
-                    val segFadeHead = 1f - (i.toFloat() / SEGMENTS)
-                    val segFadeTail = 1f - ((i + 1).toFloat() / SEGMENTS)
+                    // V11 Alpha: Enhanced depth fading
+                    val distFade = (1f - (zHead / maxDepth)).pow(1.5f).coerceIn(0f, 1f)
+                    val segFadeHead = (1f - (i.toFloat() / SEGMENTS)).pow(0.8f)
+                    val segFadeTail = (1f - ((i + 1).toFloat() / SEGMENTS)).pow(0.8f)
                     
                     val alphaA = distFade * segFadeHead
                     val alphaB = distFade * segFadeTail
