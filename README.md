@@ -1,11 +1,13 @@
-# HyperJump- **V12 - Energy Burst (Current)**: High-performance GPU-based radial flow. Thousands of fragments (shards, lines, streaks) with layered parallax and a fixed core.
+# HyperJump Live Wallpaper
+
+Android live wallpaper with OpenGL ES 2.0 rendering engine.
 
 ## Versions
+
+- **V12 - Energy Burst (Current)**: High-performance GPU-based radial flow. Thousands of fragments (shards, lines, streaks) with layered parallax, pulsing core, and breathing expansion speed.
 - **V11 - Light Tunnel Evolved**: Spiral tunnel with 1000+ segments. (Archived/Tagged)
 - **V9 - Chaos**: Multi-segment snake trails. (Baseline)
-- **V1 - Centrifuge**: Basic radial burst.
-rendering
-- Configurable FPS, star count, and color themes
+- **V1 - Centrifuge**: Basic radial burst logic.
 
 ## Building
 

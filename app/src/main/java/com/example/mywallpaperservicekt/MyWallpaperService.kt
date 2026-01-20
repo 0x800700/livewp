@@ -119,11 +119,9 @@ class MyWallpaperService : GLWallpaperService() {
                 float mask = 0.0;
                 
                 if (vType < 0.5) { 
-                    // Type 0: Shard (Jagged diamond/pentagon mix)
-                    float angle = atan(rotatedCoord.y, rotatedCoord.x);
-                    float deform = sin(angle * 5.0) * 0.1; // 5-sided jitter
-                    float d = length(rotatedCoord) + deform;
-                    mask = 1.0 - smoothstep(0.3, 0.45, d);
+                    // Type 0: Shard (Diamond-like jagged fragment) - REVERTED to preferred shape
+                    float d = abs(rotatedCoord.x) + abs(rotatedCoord.y);
+                    mask = 1.0 - smoothstep(0.3, 0.5, d);
                 } else if (vType < 1.5) {
                     // Type 1: Short Line
                     float d = abs(rotatedCoord.y) * 4.0 + abs(rotatedCoord.x);
